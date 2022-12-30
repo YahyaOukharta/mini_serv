@@ -1,19 +1,13 @@
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
 #include <stdio.h>
-#include <netdb.h>
-#include <sys/socket.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <netinet/in.h>
-#include <sys/select.h>
-
+#include <string.h>
 int extract_message(char **buf, char **msg)
 {
-	char *newbuf;
-	int i;
+	char	*newbuf;
+	int	i;
 
-	free(*msg);
 	*msg = 0;
 	if (*buf == 0)
 		return (0);
@@ -22,7 +16,7 @@ int extract_message(char **buf, char **msg)
 	{
 		if ((*buf)[i] == '\n')
 		{
-			newbuf = calloc(sizeof(*newbuf) * (strlen(*buf + i + 1) + 1) + 1, 1);
+			newbuf = calloc(1, sizeof(*newbuf) * (strlen(*buf + i + 1) + 1));
 			if (newbuf == 0)
 				return (-1);
 			strcpy(newbuf, *buf + i + 1);
@@ -36,126 +30,123 @@ int extract_message(char **buf, char **msg)
 	return (0);
 }
 
-int sockfd;
-int fd_to_id[1025] = {-1};
-int last_id = 0;
-char buf[1024][2000000];
-
-void error(char *s)
+char *str_join(char *buf, char *add)
 {
-	write(2, s, strlen(s));
-	close(sockfd);
+	char	*newbuf;
+	int		len;
+
+	if (buf == 0)
+		len = 0;
+	else
+		len = strlen(buf);
+	newbuf = malloc(sizeof(*newbuf) * (len + strlen(add) + 1));
+	if (newbuf == 0)
+		return (0);
+	newbuf[0] = 0;
+	if (buf != 0)
+		strcat(newbuf, buf);
+	free(buf);
+	strcat(newbuf, add);
+	return (newbuf);
+}
+
+void error(char *str){
+	write(2,str,strlen(str));
 	exit(1);
 }
 
+int last_id = 0;
+int ids[1025];
+char *buf[1025];
+char rd_buf[4096 * 10];
+char wr_buf[1024];
+fd_set master_rd,working_rd;
+int fd_max;
+
 void broadcast(int from, char *str){
 	for (int fd = 0; fd < 1025; fd++){
-		if (fd == from || fd_to_id[fd] == -1) continue;
+		if (fd == from || ids[fd] == -1) continue;
 		send(fd, str,strlen(str),0);
 	}
 }
-
 int main(int ac, char **av){
-
 	if (ac != 2)
 	{
-		error("Wrong number of arguments\n");
+		error( "Wrong number of arguments\n");
 	}
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sockfd == -1)
-	{
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0)
 		error("Fatal error\n");
-	}
+		
+	struct sockaddr_in	servaddr;
 
-	int connfd;
-	struct sockaddr_in servaddr;
 	bzero(&servaddr, sizeof(servaddr));
+
 	servaddr.sin_family = AF_INET;
-	servaddr.sin_addr.s_addr = htonl(2130706433); // 127.0.0.1
+	servaddr.sin_addr.s_addr = htonl(2130706433); //127.0.0.1
 	servaddr.sin_port = htons(atoi(av[1]));
 
-	if ((bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) != 0)
-	{
+	if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)))
 		error("Fatal error\n");
-	}
-	if (listen(sockfd, 10) != 0)
-	{
+	if (listen(sockfd, 0))
 		error("Fatal error\n");
+	for(int i = 0; i < 1025; i++){
+		ids[i] = -1;
+		buf[i] = 0;
 	}
-	for (int fd = 0; fd < 1025; fd++){
-		fd_to_id[fd] = -1;
-	}
-	fd_set master_rd, working_rd;
-	bzero(&master_rd, sizeof(master_rd));
+	fd_max = sockfd;
+	FD_ZERO(&master_rd);
 	FD_SET(sockfd, &master_rd);
-	struct timeval timeout = {1, 0};
-	int maxfd = sockfd;
+
 	while (1)
 	{
+
 		working_rd = master_rd;
-		int r = select(maxfd + 1, &working_rd, NULL, NULL, &timeout);
 
-		for (int fd = 0; fd <= maxfd && r; fd++)
-		{
-			if (FD_ISSET(fd, &working_rd))
-			{
-				r--;
-				if (fd == sockfd)
-				{
-					connfd = accept(sockfd, 0, 0);
-					if (connfd == -1)
-					{
+		int ret = select(fd_max + 1, &working_rd, NULL, NULL, NULL);
+		if (ret < 0)
+			error("Fatal error\n");
+
+		for(int fd = 0; fd <= fd_max && ret; fd++){
+			if(FD_ISSET(fd, &working_rd)){
+				ret--;
+				if (fd == sockfd){
+					int conn = accept(sockfd,NULL,NULL);
+					if(conn < 0)
 						error("Fatal error\n");
-					}
+					
+					ids[conn] = last_id++;
+					sprintf(wr_buf, "server: client %d just arrived\n",ids[conn]);
+					broadcast(conn, wr_buf);
 
-					FD_SET(connfd, &master_rd);
-					fd_to_id[connfd] = last_id++;
-					bzero(&buf[connfd], sizeof(buf[connfd]));
-
-					char tmp[200000] = {0};
-					sprintf(tmp, "server: client %d just arrived\n",fd_to_id[connfd]);
-					broadcast(connfd,tmp);
-
-					if (connfd > maxfd)
-						maxfd = connfd;
+					FD_SET(conn, &master_rd);
+					fd_max = conn > fd_max ? conn : fd_max;
+					break;
 				}
-				else
-				{
-					int rd;
-					while (
-						(rd = recv(fd, buf[fd] + strlen(buf[fd]), 1000,0)) == 1000 
-						&& buf[fd][strlen(buf[fd]) - 1] != '\n'
-					);
-
-					if (rd <= 0)
-					{
-						char tmp[200000] = {0};
-						sprintf(tmp, "server: client %d just left\n",fd_to_id[fd]);
-						broadcast(fd,tmp);
-
-						fd_to_id[fd] = -1;
+				else{
+					int ret = recv(fd, rd_buf, sizeof(rd_buf) - 1, 0);
+					if (ret <= 0){
+						sprintf(wr_buf, "server: client %d just left\n",ids[fd]);
+						broadcast(fd, wr_buf);
+						free(buf[fd]);
+						buf[fd] = 0;
+						ids[fd] = -1;
 						FD_CLR(fd, &master_rd);
-						while (!FD_ISSET(maxfd, &master_rd))
-							maxfd--;
+						while(!FD_ISSET(fd_max,&master_rd))
+							fd_max--;
+						break;
 					}
-					else
-					{
-						char *msg = 0;
-						char *b = calloc(sizeof(buf[fd]),1);
-						strcpy(b, buf[fd]);
-						bzero(&buf[fd], sizeof(buf[fd]));
-						while(extract_message(&b,&msg)){
-							char tmp[200000] = {0};
-							sprintf(tmp, "client %d: %s",fd_to_id[fd],msg);
-							broadcast(fd,tmp);
-						}
-						strcpy(buf[fd],b);
-						free(b);
+					rd_buf[ret] = 0;
+					buf[fd] = str_join(buf[fd],rd_buf);
+					char *msg;
+					while (extract_message(&buf[fd],&msg)){
+						sprintf(wr_buf, "client %d: ",ids[fd]);
+						broadcast(fd, wr_buf);
+						broadcast(fd, msg);
+						free(msg);
 					}
 				}
 			}
 		}
 	}
-
-	return (0);
 }
